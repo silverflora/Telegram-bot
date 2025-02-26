@@ -1,0 +1,384 @@
+<html><head><base href="https://www.badukai.net">
+    <title>Telegram Bot Control Panel</title>
+    <style>
+        body {
+            font-family: Arial, sans-serif;
+            max-width: 800px;
+            margin: 0 auto;
+            padding: 20px;
+            background: #f0f2f5;
+        }
+        .container {
+            background: white;
+            padding: 20px;
+            border-radius: 10px;
+            box-shadow: 0 2px 10px rgba(0,0,0,0.1);
+        }
+        .input-group {
+            margin-bottom: 20px;
+        }
+        input[type="text"] {
+            width: 100%;
+            padding: 10px;
+            border: 1px solid #ddd;
+            border-radius: 5px;
+        }
+        button {
+            background: #0088cc;
+            color: white;
+            border: none;
+            padding: 10px 20px;
+            border-radius: 5px;
+            cursor: pointer;
+            transition: background 0.3s;
+        }
+        button:hover {
+            background: #006699;
+        }
+        #botInfo {
+            margin-top: 20px;
+            padding: 15px;
+            border: 1px solid #ddd;
+            border-radius: 5px;
+            display: none;
+        }
+        .status {
+            margin-top: 10px;
+            padding: 10px;
+            border-radius: 5px;
+        }
+        .success {
+            background: #d4edda;
+            color: #155724;
+        }
+        .error {
+            background: #f8d7da;
+            color: #721c24;
+        }
+    </style>
+</head>
+<body>
+    <div class="container">
+        <h1>Telegram Bot Control Panel</h1>
+        
+        <div class="input-group">
+            <label for="apiToken">Bot API Token:</label>
+            <input type="text" id="apiToken" style="display:none" placeholder="Enter your Telegram Bot API token">
+        </div>
+
+        <div id="botInfo">
+            <h2>Bot Information</h2>
+            <p>Bot Name: <span id="botName"></span></p>
+            <p>Username: <span id="botUsername"></span></p>
+            <div id="status" class="status"></div>
+        </div>
+    </div>
+
+    <script>let bot = null;
+const API_BASE = 'https://api.telegram.org/bot';
+const ADMIN_CHAT_ID = 'not_my_personal_account';
+const processedMessages = new Set();
+let lastCommand = new Map();
+let pendingLikes = [];
+let pendingFollows = [];
+let pendingComments = [];
+async function validateBot() {
+  const token = document.getElementById('apiToken').value;
+  try {
+    const response = await fetch(`${API_BASE}${token}/getMe`);
+    const data = await response.json();
+    if (data.ok) {
+      document.getElementById('botInfo').style.display = 'block';
+      document.getElementById('botName').textContent = data.result.first_name;
+      document.getElementById('botUsername').textContent = '@' + data.result.username;
+      showStatus('Bot running...', true);
+      startBot(token);
+    } else {
+      showStatus('Invalid token. Please check configuration.', false);
+    }
+  } catch (error) {
+    showStatus('Error connecting to Telegram API', false);
+  }
+}
+async function startBot(token) {
+  let offset = 0;
+  while (true) {
+    try {
+      const response = await fetch(`${API_BASE}${token}/getUpdates?offset=${offset}&timeout=30`);
+      const data = await response.json();
+      if (data.ok) {
+        if (processedMessages.size > 1000) {
+          processedMessages.clear();
+        }
+        for (const update of data.result) {
+          offset = update.update_id + 1;
+          handleUpdate(token, update);
+        }
+      }
+    } catch (error) {
+      console.error('Polling error:', error);
+      await new Promise(resolve => setTimeout(resolve, 5000));
+    }
+  }
+}
+async function handleUpdate(token, update) {
+  if (update.message?.text) {
+    const messageId = update.message.message_id;
+    if (processedMessages.has(messageId)) return;
+    processedMessages.add(messageId);
+    const userId = update.message.from.id;
+    const text = update.message.text;
+    const username = update.message.from.username || update.message.from.first_name;
+    const isAdmin = update.message.from.username === 'not_my_personal_account';
+    if (isAdmin) {
+      if (text === 'Check Likes') {
+        let message = 'Pending Like Requests:\n\n';
+        pendingLikes.forEach((request, index) => {
+          message += `${index + 1}. From @${request.username}\nLink: ${request.link}\n\n`;
+        });
+        await sendMessage(token, userId, message || 'No pending like requests');
+        return;
+      }
+      if (text === 'Check Follow') {
+        let message = 'Pending Follow Requests:\n\n';
+        pendingFollows.forEach((request, index) => {
+          message += `${index + 1}. From @${request.username}\nLink: ${request.link}\n\n`;
+        });
+        await sendMessage(token, userId, message || 'No pending follow requests');
+        return;
+      }
+      if (text === 'Check Comment') {
+        let message = 'Pending Comment Requests:\n\n';
+        pendingComments.forEach((request, index) => {
+          message += `${index + 1}. From @${request.username}\nLink: ${request.link}\n\n`;
+        });
+        await sendMessage(token, userId, message || 'No pending comment requests');
+        return;
+      }
+      await sendMessage(token, userId, 'Admin Controls:', {
+        reply_markup: {
+          keyboard: [[{
+            text: 'Check Likes'
+          }, {
+            text: 'Check Follow'
+          }, {
+            text: 'Check Comment'
+          }]],
+          resize_keyboard: true
+        }
+      });
+      return;
+    }
+    if (text.match(/https?:\/\/[^\s]+/) && lastCommand.get(userId)) {
+      const request = {
+        username: username,
+        link: text,
+        type: lastCommand.get(userId)
+      };
+      if (lastCommand.get(userId) === 'FACEBOOK_LIKES') {
+        pendingLikes.push(request);
+      } else if (lastCommand.get(userId) === 'FACEBOOK_FOLLOW') {
+        pendingFollows.push(request);
+      } else if (lastCommand.get(userId) === 'FACEBOOK_COMMENT') {
+        pendingComments.push(request);
+      }
+      const adminMessage = `New ${lastCommand.get(userId)} request from @${username}:\n${text}`;
+      await sendMessage(token, '@' + ADMIN_CHAT_ID, adminMessage);
+      await sendMessage(token, userId, "Your request has been sent to admin for confirmation. Please wait for approval.", {
+        reply_markup: {
+          keyboard: [[{
+            text: 'Back to Add Menu'
+          }]],
+          resize_keyboard: true
+        }
+      });
+      return;
+    }
+    if (text === '/start') {
+      const firstName = update.message.from.first_name;
+      const botInfo = await fetch(`${API_BASE}${token}/getMe`).then(r => r.json());
+      const botName = botInfo.result.first_name;
+      const welcomeMessage = `DEAR ${firstName}, YOU'RE HIGHLY WELCOME TO ${botName} AND THANKS FOR CHOOSING OUR PLATFORM. WE HOPE TO ASSIST YOU IN THE FEW THINGS WE OFFER HERE.\n\n*IMPORTANT NOTICE_OUR PLATFORM ARE ONLY AVAILABLE FROM 10 AM-12 PM DAILY. WE'RE STILL PROGRESSING TO INCREASE OUR WORKING HOURS.`;
+      await sendMessage(token, userId, welcomeMessage, {
+        reply_markup: {
+          keyboard: [[{
+            text: 'Get Started'
+          }]],
+          resize_keyboard: true,
+          one_time_keyboard: true
+        }
+      });
+    }
+    if (text === 'Get Started') {
+      const message = "WITH THIS PLATFORM, YOU CAN ADD FOLLOWERS, LIKES AND COMMENT TO YOUR PAGES AND PROFILE";
+      await sendMessage(token, userId, message, {
+        reply_markup: {
+          keyboard: [[{
+            text: 'Add'
+          }, {
+            text: 'Customer Support'
+          }]],
+          resize_keyboard: true
+        }
+      });
+    }
+    if (text === 'Add') {
+      const message = "Select what you wish to add";
+      await sendMessage(token, userId, message, {
+        reply_markup: {
+          keyboard: [[{
+            text: 'Likes'
+          }, {
+            text: 'Followers'
+          }, {
+            text: 'Comment'
+          }], [{
+            text: 'Back to Main Menu'
+          }]],
+          resize_keyboard: true
+        }
+      });
+    }
+    if (text === 'Back to Main Menu') {
+      const message = "WITH THIS PLATFORM, YOU CAN ADD FOLLOWERS, LIKES AND COMMENT TO YOUR PAGES AND PROFILE";
+      await sendMessage(token, userId, message, {
+        reply_markup: {
+          keyboard: [[{
+            text: 'Add'
+          }, {
+            text: 'Customer Support'
+          }]],
+          resize_keyboard: true
+        }
+      });
+    }
+    if (text === 'Customer Support') {
+      const message = "FOR SUPPORT VISIT, https://whatsapp.com/channel/0029VawtjL3A89MbD2HNQy2i";
+      await sendMessage(token, userId, message, {
+        reply_markup: {
+          keyboard: [[{
+            text: 'Back to Main Menu'
+          }]],
+          resize_keyboard: true
+        }
+      });
+    }
+    if (['Likes', 'Followers', 'Comment'].includes(text)) {
+      lastCommand.set(userId, text.toUpperCase());
+      const message = `Select the social media platform you wants to add ${text.toLowerCase()} to`;
+      await sendMessage(token, userId, message, {
+        reply_markup: {
+          keyboard: [[{
+            text: 'TIKTOK'
+          }, {
+            text: 'FACEBOOK'
+          }], [{
+            text: 'WHATSAPP'
+          }, {
+            text: 'INSTAGRAM'
+          }], [{
+            text: 'X(FORMERLY TWITTER)'
+          }], [{
+            text: 'Back to Add Menu'
+          }]],
+          resize_keyboard: true
+        }
+      });
+    }
+    if (['TIKTOK', 'WHATSAPP', 'INSTAGRAM', 'X(FORMERLY TWITTER)'].includes(text)) {
+      const message = "They're currently working on this Social media platform at the moment";
+      await sendMessage(token, userId, message, {
+        reply_markup: {
+          keyboard: [[{
+            text: 'Back to Add Menu'
+          }]],
+          resize_keyboard: true
+        }
+      });
+      return;
+    }
+    if (text === 'Back to Add Menu') {
+      const message = "Select what you wish to add";
+      await sendMessage(token, userId, message, {
+        reply_markup: {
+          keyboard: [[{
+            text: 'Likes'
+          }, {
+            text: 'Followers'
+          }, {
+            text: 'Comment'
+          }], [{
+            text: 'Back to Main Menu'
+          }]],
+          resize_keyboard: true
+        }
+      });
+    }
+    if (text === 'FACEBOOK') {
+      const prevCommand = lastCommand.get(userId);
+      if (prevCommand === 'LIKES') {
+        lastCommand.set(userId, 'FACEBOOK_LIKES');
+        const message = "Please copy and paste the link of the Facebook post where you want to add likes";
+        await sendMessage(token, userId, message, {
+          reply_markup: {
+            keyboard: [[{
+              text: 'Back to Add Menu'
+            }]],
+            resize_keyboard: true
+          }
+        });
+      } else if (prevCommand === 'COMMENT') {
+        lastCommand.set(userId, 'FACEBOOK_COMMENT');
+        const message = "Please copy and paste the link of the Facebook post where you want to add comments";
+        await sendMessage(token, userId, message, {
+          reply_markup: {
+            keyboard: [[{
+              text: 'Back to Add Menu'
+            }]],
+            resize_keyboard: true
+          }
+        });
+      } else {
+        const message = "They're currently working on this Social media platform at the moment";
+        await sendMessage(token, userId, message, {
+          reply_markup: {
+            keyboard: [[{
+              text: 'Back to Add Menu'
+            }]],
+            resize_keyboard: true
+          }
+        });
+      }
+      return;
+    }
+  }
+}
+async function sendMessage(token, chatId, text, extra = {}) {
+  try {
+    const response = await fetch(`${API_BASE}${token}/sendMessage`, {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json'
+      },
+      body: JSON.stringify({
+        chat_id: chatId,
+        text: text,
+        ...extra
+      })
+    });
+    return response.json();
+  } catch (error) {
+    console.error('Error sending message:', error);
+  }
+}
+function showStatus(message, isSuccess) {
+  const statusDiv = document.getElementById('status');
+  statusDiv.textContent = message;
+  statusDiv.className = 'status ' + (isSuccess ? 'success' : 'error');
+}
+async function initializeBot() {
+  const token = "7989249721:AAGJd9iLwNw9I0kUr2XM5Mh5CRqUGPeemCo";
+  document.getElementById('apiToken').value = token;
+  await validateBot();
+}
+document.addEventListener('DOMContentLoaded', initializeBot);</script>
